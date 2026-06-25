@@ -1,0 +1,11 @@
+name: document-transformation
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - streamlit
+  - pandoc
+  - pymupdf
+  - pdfplumber
+  - jinja2
