@@ -9,6 +9,13 @@ import fitz
 import pdfplumber
 
 from src.converters.docx_to_latex import ConversionError
+from src.reference_extractor import (
+    ReferenceEntry,
+    extract_references,
+    render_references_md,
+    render_thebibliography_tex,
+    split_page_at_references_header,
+)
 
 
 @dataclass(frozen=True)
@@ -19,6 +26,7 @@ class PdfConversionResult:
     table_files: list[Path]
     page_count: int
     warning_count: int
+    reference_count: int
 
 
 @dataclass(frozen=True)
@@ -48,6 +56,7 @@ def convert_pdf_to_latex(source_path: Path, output_dir: Path) -> PdfConversionRe
     main_tex = project_dir / "main.tex"
     warnings_path = notes_dir / "conversion_warnings.md"
     equations_path = notes_dir / "equations_to_review.md"
+    references_path = notes_dir / "references.md"
 
     if project_dir.exists():
         shutil.rmtree(project_dir)
@@ -64,9 +73,20 @@ def convert_pdf_to_latex(source_path: Path, output_dir: Path) -> PdfConversionRe
     warning_count = sum(1 for warning in warnings if warning.startswith("- "))
     equations: list[EquationCandidate] = []
 
-    main_tex.write_text(_render_latex(source_path.name, pages, equations), encoding="utf-8")
+    references, ref_start_page = extract_references(pages)
+    escaped_references = [
+        ReferenceEntry(index=r.index, raw_text=_escape_latex(r.raw_text))
+        for r in references
+    ]
+    bibliography_tex = render_thebibliography_tex(escaped_references)
+
+    main_tex.write_text(
+        _render_latex(source_path.name, pages, equations, bibliography_tex, ref_start_page),
+        encoding="utf-8",
+    )
     warnings_path.write_text("\n".join(warnings) + "\n", encoding="utf-8")
     equations_path.write_text(_render_equation_review(equations), encoding="utf-8")
+    references_path.write_text(render_references_md(references, ref_start_page), encoding="utf-8")
 
     return PdfConversionResult(
         project_dir=project_dir,
@@ -75,6 +95,7 @@ def convert_pdf_to_latex(source_path: Path, output_dir: Path) -> PdfConversionRe
         table_files=table_files,
         page_count=len(pages),
         warning_count=warning_count,
+        reference_count=len(references),
     )
 
 
@@ -148,11 +169,33 @@ def _build_warnings(pages: list[PdfPageContent]) -> list[str]:
     ]
 
 
-def _render_latex(source_name: str, pages: list[PdfPageContent], equations: list[EquationCandidate]) -> str:
+def _render_latex(
+    source_name: str,
+    pages: list[PdfPageContent],
+    equations: list[EquationCandidate],
+    bibliography_tex: str,
+    ref_start_page: int | None,
+) -> str:
     body: list[str] = []
     table_file_index = 1
 
     for page in pages:
+        if ref_start_page is not None and page.page_number > ref_start_page:
+            continue
+
+        if ref_start_page is not None and page.page_number == ref_start_page:
+            pre_text, _ = split_page_at_references_header(page.text)
+            if pre_text.strip():
+                body.append(f"\\section*{{Page {page.page_number}}}")
+                body.append("")
+                body.append(_text_to_latex_with_equation_placeholders(pre_text, page.page_number, equations))
+                body.append("")
+            body.append("\\section*{References}")
+            body.append("")
+            body.append(bibliography_tex)
+            body.append("")
+            continue
+
         body.append(f"\\section*{{Page {page.page_number}}}")
         body.append("")
 
@@ -163,7 +206,7 @@ def _render_latex(source_name: str, pages: list[PdfPageContent], equations: list
 
         body.append("")
 
-        for table_number, table in enumerate(page.tables, start=1):
+        for table_number, _ in enumerate(page.tables, start=1):
             body.append(f"\\subsection*{{Detected Table {table_number}}}")
             body.append(f"\\input{{{_table_file_path(page.page_number, table_file_index).as_posix()}}}")
             body.append("")
