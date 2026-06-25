@@ -89,6 +89,10 @@ After conversion, the Streamlit app shows a review workbench:
 Use `Compile generated PDF` after editing the LaTeX source to refresh the middle
 preview.
 
+Use `Clean duplicate tables` if `main.tex` contains full table bodies that also
+exist in `tables/page_*_table_*.tex`; the app replaces exact duplicates with
+matching `\input{tables/...}` lines.
+
 ## Later updates
 
 To add packages later without changing `base`, edit `environment.yml` and run:

@@ -8,6 +8,7 @@ import streamlit as st
 from src.converters.docx_to_latex import ConversionError, convert_docx_to_latex
 from src.converters.pdf_to_latex import convert_pdf_to_latex
 from src.latex_compiler import LatexCompileError, compile_latex_project
+from src.latex_project_cleanup import replace_duplicate_table_blocks
 from src.latex_sanitizer import sanitize_latex_source
 from src.pdf_preview import render_pdf_preview
 from src.project_archive import create_project_zip
@@ -130,12 +131,14 @@ if last_conversion is not None:
         set_selected_project_file(selected_file)
 
     with st.container():
-        clear_action, restart_action, spacer = st.columns([1, 1, 3])
+        clear_action, restart_action, cleanup_action, spacer = st.columns([1, 1, 1, 2])
 
         with clear_action:
             clear_previews = st.button("Clear previews")
         with restart_action:
             restart_conversion = st.button("Restart conversion")
+        with cleanup_action:
+            cleanup_tables = st.button("Clean duplicate tables")
 
         left_action, middle_action, right_action = st.columns([1, 1, 1])
 
@@ -187,6 +190,22 @@ if last_conversion is not None:
                 st.session_state.pop("compiled_pdf_path", None)
                 st.success("Conversion restarted.")
                 st.rerun()
+
+    if cleanup_tables:
+        selected_file = Path(st.session_state["selected_project_file"])
+        save_selected_project_file(selected_file, st.session_state["edited_project_file_source"])
+        cleanup_result = replace_duplicate_table_blocks(project_dir)
+        if cleanup_result.replaced_count:
+            set_selected_project_file(main_tex)
+            zip_path = create_project_zip(project_dir)
+            st.session_state["last_conversion"]["zip_path"] = zip_path
+            st.success(
+                f"Replaced {cleanup_result.replaced_count} duplicate table blocks "
+                f"out of {cleanup_result.checked_count} table files."
+            )
+            st.rerun()
+        else:
+            st.info(f"No duplicate table blocks found across {cleanup_result.checked_count} table files.")
 
     if save_source:
         selected_file = Path(st.session_state["selected_project_file"])
