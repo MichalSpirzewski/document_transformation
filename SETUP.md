@@ -58,6 +58,17 @@ streamlit run app.py
 
 Streamlit will print a local URL, usually `http://localhost:8501`.
 
+## Compile a generated LaTeX project
+
+From inside one generated project folder:
+
+```bash
+latexmk -pdf -interaction=nonstopmode -halt-on-error main.tex
+```
+
+The converter generates standalone LaTeX and patches common Word symbols so
+`pdflatex` can compile them on this machine.
+
 ## Later updates
 
 To add packages later without changing `base`, edit `environment.yml` and run:

@@ -33,13 +33,16 @@ def convert_docx_to_latex(source_path: Path, output_dir: Path) -> DocxConversion
         shutil.rmtree(project_dir)
 
     media_dir.mkdir(parents=True, exist_ok=True)
+    source_path = source_path.resolve()
 
     command = [
         "pandoc",
         str(source_path),
         "-o",
-        str(main_tex),
-        f"--extract-media={media_dir}",
+        main_tex.name,
+        "--standalone",
+        "--wrap=none",
+        f"--extract-media={media_dir.name}",
     ]
 
     try:
@@ -48,6 +51,7 @@ def convert_docx_to_latex(source_path: Path, output_dir: Path) -> DocxConversion
             check=True,
             capture_output=True,
             text=True,
+            cwd=project_dir,
         )
     except FileNotFoundError as error:
         raise ConversionError("Pandoc is not available in the active environment.") from error
@@ -59,6 +63,8 @@ def convert_docx_to_latex(source_path: Path, output_dir: Path) -> DocxConversion
         details = completed.stderr.strip() or completed.stdout.strip() or "No details returned."
         raise ConversionError(f"Pandoc finished but did not create main.tex. {details}")
 
+    _patch_latex_compatibility(main_tex)
+
     media_files = sorted(path for path in media_dir.rglob("*") if path.is_file())
 
     return DocxConversionResult(
@@ -67,3 +73,37 @@ def convert_docx_to_latex(source_path: Path, output_dir: Path) -> DocxConversion
         media_dir=media_dir,
         media_files=media_files,
     )
+
+
+PDFLATEX_SYMBOL_REPLACEMENTS = {
+    "☐": r"\(\square\)",
+    "☑": r"\(\checkmark\)",
+    "☒": r"\(\boxtimes\)",
+    "✓": r"\(\checkmark\)",
+    "✔": r"\(\checkmark\)",
+    "□": r"\(\square\)",
+    "■": r"\(\blacksquare\)",
+    "▪": r"\(\blacksquare\)",
+    "●": r"\(\bullet\)",
+    "○": r"\(\circ\)",
+    "◦": r"\(\circ\)",
+}
+
+
+def _patch_latex_compatibility(main_tex: Path) -> None:
+    content = main_tex.read_text(encoding="utf-8")
+    original_content = content
+
+    for symbol, replacement in PDFLATEX_SYMBOL_REPLACEMENTS.items():
+        content = content.replace(symbol, replacement)
+
+    if "\\ul{" in content and "\\providecommand{\\ul}" not in content and "\\newcommand{\\ul}" not in content:
+        compatibility = "\\usepackage[normalem]{ulem}\n\\providecommand{\\ul}{\\uline}\n"
+
+        if "\\begin{document}" in content:
+            content = content.replace("\\begin{document}", f"{compatibility}\\begin{{document}}", 1)
+        else:
+            content = f"{compatibility}{content}"
+
+    if content != original_content:
+        main_tex.write_text(content, encoding="utf-8")
