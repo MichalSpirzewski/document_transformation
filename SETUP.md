@@ -80,6 +80,10 @@ PDF conversion is currently a draft generator for digital PDFs:
 Scanned/image-only PDFs, equations, figures, captions, and complex page layouts
 will still need manual review.
 
+Equation-like lines in digital PDFs are detected with simple heuristics. The app
+replaces them with display-math placeholders in `main.tex` and writes the
+original extracted text to `notes/equations_to_review.md`.
+
 After conversion, the Streamlit app shows a review workbench:
 
 - left: editable generated LaTeX source

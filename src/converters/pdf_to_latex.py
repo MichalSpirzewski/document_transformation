@@ -28,6 +28,13 @@ class PdfPageContent:
     tables: list[list[list[str]]]
 
 
+@dataclass(frozen=True)
+class EquationCandidate:
+    index: int
+    page_number: int
+    extracted_text: str
+
+
 def convert_pdf_to_latex(source_path: Path, output_dir: Path) -> PdfConversionResult:
     if source_path.suffix.lower() != ".pdf":
         raise ConversionError("Only PDF files are supported by the PDF converter.")
@@ -40,6 +47,7 @@ def convert_pdf_to_latex(source_path: Path, output_dir: Path) -> PdfConversionRe
     notes_dir = project_dir / "notes"
     main_tex = project_dir / "main.tex"
     warnings_path = notes_dir / "conversion_warnings.md"
+    equations_path = notes_dir / "equations_to_review.md"
 
     if project_dir.exists():
         shutil.rmtree(project_dir)
@@ -54,9 +62,11 @@ def convert_pdf_to_latex(source_path: Path, output_dir: Path) -> PdfConversionRe
     table_files = _write_table_files(pages, tables_dir)
     warnings = _build_warnings(pages)
     warning_count = sum(1 for warning in warnings if warning.startswith("- "))
+    equations: list[EquationCandidate] = []
 
-    main_tex.write_text(_render_latex(source_path.name, pages), encoding="utf-8")
+    main_tex.write_text(_render_latex(source_path.name, pages, equations), encoding="utf-8")
     warnings_path.write_text("\n".join(warnings) + "\n", encoding="utf-8")
+    equations_path.write_text(_render_equation_review(equations), encoding="utf-8")
 
     return PdfConversionResult(
         project_dir=project_dir,
@@ -138,7 +148,7 @@ def _build_warnings(pages: list[PdfPageContent]) -> list[str]:
     ]
 
 
-def _render_latex(source_name: str, pages: list[PdfPageContent]) -> str:
+def _render_latex(source_name: str, pages: list[PdfPageContent], equations: list[EquationCandidate]) -> str:
     body: list[str] = []
     table_file_index = 1
 
@@ -147,7 +157,7 @@ def _render_latex(source_name: str, pages: list[PdfPageContent]) -> str:
         body.append("")
 
         if page.text:
-            body.append(_paragraphs_to_latex(page.text))
+            body.append(_text_to_latex_with_equation_placeholders(page.text, page.page_number, equations))
         else:
             body.append("\\emph{No digital text was extracted from this page.}")
 
@@ -192,12 +202,124 @@ def _table_file_path(page_number: int, table_index: int) -> Path:
     return Path("tables") / f"page_{page_number:03d}_table_{table_index:03d}.tex"
 
 
-def _paragraphs_to_latex(text: str) -> str:
-    paragraphs = [paragraph.strip() for paragraph in text.split("\n\n") if paragraph.strip()]
-    if not paragraphs:
-        paragraphs = [line.strip() for line in text.splitlines() if line.strip()]
+def _text_to_latex_with_equation_placeholders(
+    text: str,
+    page_number: int,
+    equations: list[EquationCandidate],
+) -> str:
+    blocks = []
+    pending_paragraph: list[str] = []
 
-    return "\n\n".join(_escape_latex(paragraph) for paragraph in paragraphs)
+    for line in [line.strip() for line in text.splitlines()]:
+        if not line:
+            if pending_paragraph:
+                blocks.append(_escape_latex(" ".join(pending_paragraph)))
+                pending_paragraph = []
+            continue
+
+        if _looks_like_equation(line):
+            if pending_paragraph:
+                blocks.append(_escape_latex(" ".join(pending_paragraph)))
+                pending_paragraph = []
+
+            equation = EquationCandidate(
+                index=len(equations) + 1,
+                page_number=page_number,
+                extracted_text=line,
+            )
+            equations.append(equation)
+            blocks.append(_equation_placeholder(equation))
+        else:
+            pending_paragraph.append(line)
+
+    if pending_paragraph:
+        blocks.append(_escape_latex(" ".join(pending_paragraph)))
+
+    return "\n\n".join(blocks)
+
+
+def _looks_like_equation(line: str) -> bool:
+    normalized = unicodedata.normalize("NFKC", line).strip()
+    if len(normalized) < 4 or len(normalized) > 180:
+        return False
+
+    letters = sum(character.isalpha() for character in normalized)
+    digits = sum(character.isdigit() for character in normalized)
+    math_symbols = sum(character in "=+-−±*/√∑∫≤≥<>^()[]{}|" for character in normalized)
+    greek_or_math = sum(_is_greek_or_math_symbol(character) for character in normalized)
+    words = [word for word in normalized.split() if any(character.isalpha() for character in word)]
+    has_sentence_punctuation = any(character in normalized for character in ".,;:")
+
+    if greek_or_math == 0 and len(words) > 6:
+        return False
+
+    if greek_or_math == 0 and has_sentence_punctuation and len(words) > 3:
+        return False
+
+    if "=" in normalized and (math_symbols + greek_or_math + digits) >= 3 and len(words) <= 6:
+        return True
+
+    if greek_or_math >= 2 and math_symbols >= 1:
+        return True
+
+    strong_math_marker = any(character in normalized for character in "√∑∫±≤≥")
+    if math_symbols >= 4 and letters <= 18 and digits > 0 and (greek_or_math > 0 or strong_math_marker):
+        return True
+
+    return False
+
+
+def _is_greek_or_math_symbol(character: str) -> bool:
+    name = unicodedata.name(character, "")
+    return "GREEK" in name or "MATHEMATICAL" in name
+
+
+def _equation_placeholder(equation: EquationCandidate) -> str:
+    return "\n".join(
+        [
+            r"\[",
+            f"% TODO equation {equation.index}: transcribe from original PDF page {equation.page_number}",
+            r"\]",
+        ]
+    )
+
+
+def _render_equation_review(equations: list[EquationCandidate]) -> str:
+    lines = [
+        "# Equations To Review",
+        "",
+        "Detected equation-like text is replaced in `main.tex` with LaTeX display-math placeholders.",
+        "Copy or transcribe the equation from the original PDF into the matching placeholder.",
+        "",
+    ]
+
+    if not equations:
+        lines.append("No equation-like lines were detected.")
+        return "\n".join(lines) + "\n"
+
+    for equation in equations:
+        lines.extend(
+            [
+                f"## Equation {equation.index}",
+                "",
+                f"- Page: {equation.page_number}",
+                "",
+                "Extracted text:",
+                "",
+                "```text",
+                equation.extracted_text,
+                "```",
+                "",
+                "Placeholder:",
+                "",
+                "```latex",
+                _equation_placeholder(equation),
+                "```",
+                "",
+            ]
+        )
+
+    return "\n".join(lines)
 
 
 def _render_table(table: list[list[str]]) -> str:
