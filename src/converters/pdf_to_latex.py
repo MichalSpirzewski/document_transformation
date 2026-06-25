@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import re
 import shutil
 import unicodedata
-from dataclasses import dataclass
+from collections import Counter
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import fitz
@@ -10,12 +12,21 @@ import pdfplumber
 
 from src.converters.docx_to_latex import ConversionError
 from src.reference_extractor import (
+    REFERENCES_HEADER_RE,
     ReferenceEntry,
     extract_references,
     render_references_md,
     render_thebibliography_tex,
-    split_page_at_references_header,
 )
+
+_NUMBERED_SECTION_RE = re.compile(r"^\d+(\.\d+)*\.?\s+\S")
+_ALL_CAPS_MIN_ALPHA = 4
+
+_HEADING_COMMANDS = {
+    1: r"\section*",
+    2: r"\subsection*",
+    3: r"\subsubsection*",
+}
 
 
 @dataclass(frozen=True)
@@ -30,10 +41,20 @@ class PdfConversionResult:
 
 
 @dataclass(frozen=True)
+class TextLine:
+    text: str
+    heading_level: int  # 0 = body, 1 = section, 2 = subsection, 3 = subsubsection
+
+
+@dataclass(frozen=True)
 class PdfPageContent:
     page_number: int
-    text: str
-    tables: list[list[list[str]]]
+    lines: list[TextLine] = field(default_factory=list)
+    tables: list[list[list[str]]] = field(default_factory=list)
+
+    @property
+    def text(self) -> str:
+        return "\n".join(line.text for line in self.lines)
 
 
 @dataclass(frozen=True)
@@ -99,14 +120,97 @@ def convert_pdf_to_latex(source_path: Path, output_dir: Path) -> PdfConversionRe
     )
 
 
+# ---------------------------------------------------------------------------
+# PDF content extraction
+# ---------------------------------------------------------------------------
+
+def _detect_body_font_size(source_path: Path) -> float:
+    """Return the most common font size by character count across the document."""
+    sizes: Counter[float] = Counter()
+    with fitz.open(source_path) as doc:
+        for page in doc:
+            for block in page.get_text("dict")["blocks"]:
+                for line in block.get("lines", []):
+                    for span in line.get("spans", []):
+                        text = span["text"].strip()
+                        if text:
+                            sizes[round(span["size"], 1)] += len(text)
+    return sizes.most_common(1)[0][0] if sizes else 11.0
+
+
+def _classify_page_lines(page: fitz.Page, body_size: float) -> list[TextLine]:
+    """Extract lines from a page and classify each as body text or a heading level."""
+    lines: list[TextLine] = []
+
+    for block in page.get_text("dict")["blocks"]:
+        for raw_line in block.get("lines", []):
+            spans = raw_line.get("spans", [])
+            if not spans:
+                continue
+
+            line_text = "".join(s["text"] for s in spans).strip()
+            if not line_text:
+                lines.append(TextLine(text="", heading_level=0))
+                continue
+
+            sizes = [round(s["size"], 1) for s in spans if s["text"].strip()]
+            dominant_size = max(set(sizes), key=sizes.count) if sizes else 0.0
+            is_bold = any(bool(s["flags"] & (1 << 4)) for s in spans if s["text"].strip())
+            is_body_size = abs(dominant_size - body_size) < 0.5
+
+            if is_body_size and is_bold and _is_section_heading(line_text):
+                lines.append(TextLine(text=line_text, heading_level=_section_level(line_text)))
+            else:
+                lines.append(TextLine(text=line_text, heading_level=0))
+
+    return lines
+
+
+def _is_section_heading(text: str) -> bool:
+    """Return True if bold body-size text looks like a section heading."""
+    stripped = text.strip()
+    if not stripped:
+        return False
+
+    lower = stripped.lower()
+    if lower.startswith("figure") or lower.startswith("table"):
+        return False
+
+    if _NUMBERED_SECTION_RE.match(stripped):
+        return True
+
+    alpha_chars = [c for c in stripped if c.isalpha()]
+    if (
+        len(alpha_chars) >= _ALL_CAPS_MIN_ALPHA
+        and all(c.isupper() for c in alpha_chars)
+        and len(stripped.split()) <= 4
+    ):
+        return True
+
+    return False
+
+
+def _section_level(text: str) -> int:
+    """Return 1/2/3 for section/subsection/subsubsection based on numbering depth."""
+    m = re.match(r"^(\d+)(\.(\d+)(\.(\d+))?)?\.?\s", text.strip())
+    if not m:
+        return 1
+    if m.group(5) is not None:
+        return 3
+    if m.group(3) is not None:
+        return 2
+    return 1
+
+
 def _extract_pdf_content(source_path: Path) -> list[PdfPageContent]:
+    body_size = _detect_body_font_size(source_path)
     pages: list[PdfPageContent] = []
 
     with fitz.open(source_path) as document, pdfplumber.open(source_path) as plumber_pdf:
         for index, page in enumerate(document, start=1):
-            text = page.get_text("text").strip()
+            lines = _classify_page_lines(page, body_size)
             tables = _extract_page_tables(plumber_pdf, index)
-            pages.append(PdfPageContent(page_number=index, text=text, tables=tables))
+            pages.append(PdfPageContent(page_number=index, lines=lines, tables=tables))
 
     return pages
 
@@ -169,6 +273,10 @@ def _build_warnings(pages: list[PdfPageContent]) -> list[str]:
     ]
 
 
+# ---------------------------------------------------------------------------
+# LaTeX rendering
+# ---------------------------------------------------------------------------
+
 def _render_latex(
     source_name: str,
     pages: list[PdfPageContent],
@@ -184,33 +292,17 @@ def _render_latex(
             continue
 
         if ref_start_page is not None and page.page_number == ref_start_page:
-            pre_text, _ = split_page_at_references_header(page.text)
-            if pre_text.strip():
-                body.append(f"\\section*{{Page {page.page_number}}}")
-                body.append("")
-                body.append(_text_to_latex_with_equation_placeholders(pre_text, page.page_number, equations))
-                body.append("")
-            body.append("\\section*{References}")
-            body.append("")
+            pre_lines = _lines_before_references_header(page.lines)
+            table_file_index = _emit_page_content(
+                body, pre_lines, page.page_number, equations, table_file_index, page.tables
+            )
             body.append(bibliography_tex)
             body.append("")
             continue
 
-        body.append(f"\\section*{{Page {page.page_number}}}")
-        body.append("")
-
-        if page.text:
-            body.append(_text_to_latex_with_equation_placeholders(page.text, page.page_number, equations))
-        else:
-            body.append("\\emph{No digital text was extracted from this page.}")
-
-        body.append("")
-
-        for table_number, _ in enumerate(page.tables, start=1):
-            body.append(f"\\subsection*{{Detected Table {table_number}}}")
-            body.append(f"\\input{{{_table_file_path(page.page_number, table_file_index).as_posix()}}}")
-            body.append("")
-            table_file_index += 1
+        table_file_index = _emit_page_content(
+            body, page.lines, page.page_number, equations, table_file_index, page.tables
+        )
 
     return "\n".join(
         [
@@ -239,6 +331,66 @@ def _render_latex(
             "",
         ]
     )
+
+
+def _emit_page_content(
+    body: list[str],
+    lines: list[TextLine],
+    page_number: int,
+    equations: list[EquationCandidate],
+    table_file_index: int,
+    page_tables: list,
+) -> int:
+    """Render a page's lines into the body list. Returns the updated table file index."""
+    non_empty = [ln for ln in lines if ln.text.strip()]
+    if not non_empty:
+        return table_file_index
+
+    has_headings = any(ln.heading_level > 0 for ln in non_empty)
+    if not has_headings:
+        body.append(f"\\section*{{Page {page_number}}}")
+        body.append("")
+
+    body_buffer: list[str] = []
+
+    def flush_body() -> None:
+        if body_buffer:
+            body.append(
+                _text_to_latex_with_equation_placeholders(
+                    "\n".join(body_buffer), page_number, equations
+                )
+            )
+            body.append("")
+            body_buffer.clear()
+
+    for line in lines:
+        if line.heading_level > 0:
+            flush_body()
+            cmd = _HEADING_COMMANDS[line.heading_level]
+            body.append(f"{cmd}{{{_escape_latex(line.text)}}}")
+            body.append("")
+        elif line.text.strip():
+            body_buffer.append(line.text)
+
+    flush_body()
+
+    for table_number, _ in enumerate(page_tables, start=1):
+        body.append(f"\\subsection*{{Detected Table {table_number}}}")
+        body.append(f"\\input{{{_table_file_path(page_number, table_file_index).as_posix()}}}")
+        body.append("")
+        table_file_index += 1
+
+    return table_file_index
+
+
+def _lines_before_references_header(lines: list[TextLine]) -> list[TextLine]:
+    """Return lines appearing before the REFERENCES section header."""
+    result = []
+    for line in lines:
+        if REFERENCES_HEADER_RE.match(line.text.strip()):
+            break
+        result.append(line)
+    return result
 
 
 def _table_file_path(page_number: int, table_index: int) -> Path:

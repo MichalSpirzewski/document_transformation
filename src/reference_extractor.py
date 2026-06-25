@@ -14,7 +14,7 @@ class ReferenceEntry:
         return f"ref{self.index}"
 
 
-_REFERENCES_HEADER = re.compile(
+REFERENCES_HEADER_RE = re.compile(
     r"^(references|bibliography|works\s+cited|literature\s+cited)\.?\s*$",
     re.IGNORECASE,
 )
@@ -33,7 +33,7 @@ def extract_references(pages: list) -> tuple[list[ReferenceEntry], int | None]:
         for line in page.text.splitlines():
             stripped = line.strip()
             if not collecting:
-                if _REFERENCES_HEADER.match(stripped):
+                if REFERENCES_HEADER_RE.match(stripped):
                     ref_start_page = page.page_number
                     collecting = True
             else:
@@ -77,7 +77,7 @@ def split_page_at_references_header(text: str) -> tuple[str, bool]:
     """Return (text before the REFERENCES header, whether the header was found)."""
     lines = text.splitlines()
     for i, line in enumerate(lines):
-        if _REFERENCES_HEADER.match(line.strip()):
+        if REFERENCES_HEADER_RE.match(line.strip()):
             return "\n".join(lines[:i]), True
     return text, False
 
