@@ -80,6 +80,15 @@ PDF conversion is currently a draft generator for digital PDFs:
 Scanned/image-only PDFs, equations, figures, captions, and complex page layouts
 will still need manual review.
 
+After conversion, the Streamlit app shows a review workbench:
+
+- left: editable generated LaTeX source
+- middle: PDF compiled from the generated LaTeX
+- right: original uploaded PDF
+
+Use `Compile generated PDF` after editing the LaTeX source to refresh the middle
+preview.
+
 ## Later updates
 
 To add packages later without changing `base`, edit `environment.yml` and run:
