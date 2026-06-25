@@ -90,6 +90,16 @@ def list_transformation_history() -> list[dict[str, Any]]:
     return history
 
 
+def list_uploaded_files() -> list[Path]:
+    if not UPLOAD_ROOT.exists():
+        return []
+    return sorted(
+        (path for path in UPLOAD_ROOT.iterdir() if path.is_file() and path.suffix.lower() in {".docx", ".pdf"}),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+
+
 def activate_history_item(item: dict[str, Any]) -> None:
     source_path = item["source_path"]
     project_dir = item["project_dir"]
@@ -131,6 +141,41 @@ def clear_output_data() -> None:
         st.session_state.pop(key, None)
 
 
+def convert_existing_source(source_path: Path) -> None:
+    output_dir = OUTPUT_ROOT / source_path.stem
+
+    with st.spinner("Converting selected upload to LaTeX..."):
+        try:
+            if source_path.suffix.lower() == ".docx":
+                result = convert_docx_to_latex(source_path, output_dir)
+                summary = f"Created `{result.main_tex.name}` with {len(result.media_files)} media files."
+            elif source_path.suffix.lower() == ".pdf":
+                result = convert_pdf_to_latex(source_path, output_dir)
+                summary = (
+                    f"Created `{result.main_tex.name}` from {result.page_count} pages "
+                    f"with {len(result.table_files)} detected tables and {result.warning_count} warnings."
+                )
+            else:
+                raise ConversionError("Only DOCX and PDF files are supported.")
+
+            zip_path = create_project_zip(result.project_dir)
+        except ConversionError as error:
+            st.error(str(error))
+            return
+
+    st.session_state["last_conversion"] = {
+        "source_path": source_path,
+        "project_dir": result.project_dir,
+        "main_tex": result.main_tex,
+        "zip_path": zip_path,
+        "source_type": source_path.suffix.lower(),
+        "summary": summary,
+    }
+    set_selected_project_file(result.main_tex)
+    st.session_state.pop("compiled_pdf_path", None)
+    st.success("Conversion complete.")
+
+
 st.set_page_config(page_title="Document Transformation", page_icon="DT", layout="wide")
 
 st.title("Document Transformation")
@@ -163,6 +208,22 @@ with st.expander("Transformation History", expanded=True):
             clear_output_data()
             st.success("Cleared local output data.")
             st.rerun()
+
+with st.expander("Uploaded Files", expanded=True):
+    uploaded_files = list_uploaded_files()
+    if uploaded_files:
+        upload_labels = [
+            f"{path.name} | {path.suffix.lower()[1:]} | {path.stat().st_size / 1024:.1f} KB"
+            for path in uploaded_files
+        ]
+        selected_upload_label = st.selectbox("Existing uploads", upload_labels)
+        selected_upload = uploaded_files[upload_labels.index(selected_upload_label)]
+
+        if st.button("Convert selected upload"):
+            convert_existing_source(selected_upload)
+            st.rerun()
+    else:
+        st.info("No uploaded DOCX or PDF files found in data/uploads.")
 
 if uploaded_file is not None:
     source_path = save_upload(uploaded_file)

@@ -215,6 +215,7 @@ def _render_table(table: list[list[str]]) -> str:
     return "\n".join(
         [
             r"\begin{longtable}{" + columns + "}",
+            r"\caption{TODO: copy table caption from original PDF}\\",
             r"\toprule",
             *rows,
             r"\bottomrule",
