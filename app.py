@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import streamlit as st
+from streamlit_ace import st_ace
 
 from src.converters.docx_to_latex import ConversionError, convert_docx_to_latex
 from src.converters.pdf_to_latex import convert_pdf_to_latex
@@ -13,11 +14,6 @@ from src.latex_project_cleanup import replace_duplicate_table_blocks
 from src.latex_sanitizer import sanitize_latex_source
 from src.pdf_preview import render_pdf_preview
 from src.project_archive import create_project_zip
-
-try:
-    from streamlit_ace import st_ace
-except ImportError:
-    st_ace = None
 
 
 UPLOAD_ROOT = Path("data/uploads")
@@ -97,6 +93,10 @@ def select_placeholder_action(action: dict[str, Any]) -> None:
 
 def render_placeholder_snippet(path: Path, line_number: int, context: int = 4) -> None:
     lines = path.read_text(encoding="utf-8").splitlines()
+    st.code(_line_numbered_snippet(lines, line_number, context), language="latex")
+
+
+def _line_numbered_snippet(lines: list[str], line_number: int, context: int = 4) -> str:
     start = max(line_number - context, 1)
     end = min(line_number + context, len(lines))
     snippet = []
@@ -105,42 +105,41 @@ def render_placeholder_snippet(path: Path, line_number: int, context: int = 4) -
         marker = ">" if current_line_number == line_number else " "
         snippet.append(f"{marker} {current_line_number:04d}: {lines[current_line_number - 1]}")
 
-    st.code("\n".join(snippet), language="latex")
+    return "\n".join(snippet)
+
+
+def _line_numbered_source(source: str) -> str:
+    return "\n".join(f"{line_number:04d}: {line}" for line_number, line in enumerate(source.splitlines(), start=1))
 
 
 def render_project_editor(selected_file: Path, selected_label: str) -> None:
     source = st.session_state["edited_project_file_source"]
-    selected_placeholder_line = st.session_state.get("selected_placeholder_line")
-
-    if st_ace is None:
-        st.text_area(
-            "Selected project file source",
-            height=760,
-            key="edited_project_file_source",
-            label_visibility="collapsed",
-        )
-        st.caption("Install `streamlit-ace` to enable the code editor view.")
-        return
-
     language = "latex" if selected_file.suffix == ".tex" else "markdown"
-    editor_key = f"ace::{selected_label}::{selected_placeholder_line or 0}"
-    edited_source = st_ace(
-        value=source,
-        language=language,
-        theme="github",
-        keybinding="vscode",
-        font_size=14,
-        tab_size=2,
-        show_gutter=True,
-        show_print_margin=False,
-        wrap=True,
-        auto_update=True,
-        height=760,
-        key=editor_key,
-    )
+    editor_key = f"ace::{selected_label}"
 
-    if edited_source is not None:
-        st.session_state["edited_project_file_source"] = edited_source
+    edit_tab, numbered_tab = st.tabs(["Edit", "Line-numbered view"])
+
+    with edit_tab:
+        edited_source = st_ace(
+            value=source,
+            language=language,
+            theme="github",
+            keybinding="vscode",
+            font_size=14,
+            tab_size=2,
+            show_gutter=True,
+            show_print_margin=False,
+            wrap=True,
+            auto_update=True,
+            height=760,
+            key=editor_key,
+        )
+
+        if edited_source is not None:
+            st.session_state["edited_project_file_source"] = edited_source
+
+    with numbered_tab:
+        st.code(_line_numbered_source(st.session_state["edited_project_file_source"]), language="latex")
 
 
 def find_source_for_project(project_dir: Path) -> Path | None:
