@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shutil
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -105,7 +106,7 @@ def _write_table_files(pages: list[PdfPageContent], tables_dir: Path) -> list[Pa
 
     for page in pages:
         for table in page.tables:
-            table_path = tables_dir / f"page_{page.page_number:03d}_table_{table_index:03d}.tex"
+            table_path = tables_dir.parent / _table_file_path(page.page_number, table_index)
             table_path.write_text(_render_table(table), encoding="utf-8")
             table_files.append(table_path)
             table_index += 1
@@ -139,6 +140,7 @@ def _build_warnings(pages: list[PdfPageContent]) -> list[str]:
 
 def _render_latex(source_name: str, pages: list[PdfPageContent]) -> str:
     body: list[str] = []
+    table_file_index = 1
 
     for page in pages:
         body.append(f"\\section*{{Page {page.page_number}}}")
@@ -153,8 +155,9 @@ def _render_latex(source_name: str, pages: list[PdfPageContent]) -> str:
 
         for table_number, table in enumerate(page.tables, start=1):
             body.append(f"\\subsection*{{Detected Table {table_number}}}")
-            body.append(_render_table(table))
+            body.append(f"\\input{{{_table_file_path(page.page_number, table_file_index).as_posix()}}}")
             body.append("")
+            table_file_index += 1
 
     return "\n".join(
         [
@@ -183,6 +186,10 @@ def _render_latex(source_name: str, pages: list[PdfPageContent]) -> str:
             "",
         ]
     )
+
+
+def _table_file_path(page_number: int, table_index: int) -> Path:
+    return Path("tables") / f"page_{page_number:03d}_table_{table_index:03d}.tex"
 
 
 def _paragraphs_to_latex(text: str) -> str:
@@ -223,6 +230,8 @@ def _clean_cell(value: object) -> str:
 
 
 def _escape_latex(value: str) -> str:
+    value = unicodedata.normalize("NFKC", value)
+
     replacements = {
         "\\": r"\textbackslash{}",
         "&": r"\&",
@@ -239,12 +248,55 @@ def _escape_latex(value: str) -> str:
         "☒": r"\(\boxtimes\)",
         "✓": r"\(\checkmark\)",
         "✔": r"\(\checkmark\)",
+        "°": r"\textdegree{}",
+        "–": "--",
+        "—": "---",
+        "−": "-",
+        "±": r"\(\pm\)",
+        "×": r"\(\times\)",
+        "≤": r"\(\leq\)",
+        "≥": r"\(\geq\)",
+        "√": r"\(\sqrt{}\)",
         "□": r"\(\square\)",
         "■": r"\(\blacksquare\)",
         "▪": r"\(\blacksquare\)",
         "●": r"\(\bullet\)",
         "○": r"\(\circ\)",
         "◦": r"\(\circ\)",
+        "α": r"\(\alpha\)",
+        "β": r"\(\beta\)",
+        "γ": r"\(\gamma\)",
+        "δ": r"\(\delta\)",
+        "ε": r"\(\epsilon\)",
+        "ζ": r"\(\zeta\)",
+        "η": r"\(\eta\)",
+        "θ": r"\(\theta\)",
+        "ι": r"\(\iota\)",
+        "κ": r"\(\kappa\)",
+        "λ": r"\(\lambda\)",
+        "μ": r"\(\mu\)",
+        "ν": r"\(\nu\)",
+        "ξ": r"\(\xi\)",
+        "π": r"\(\pi\)",
+        "ρ": r"\(\rho\)",
+        "σ": r"\(\sigma\)",
+        "τ": r"\(\tau\)",
+        "υ": r"\(\upsilon\)",
+        "φ": r"\(\phi\)",
+        "χ": r"\(\chi\)",
+        "ψ": r"\(\psi\)",
+        "ω": r"\(\omega\)",
+        "Δ": r"\(\Delta\)",
     }
 
-    return "".join(replacements.get(character, character) for character in value)
+    escaped = []
+    for character in value:
+        replacement = replacements.get(character)
+        if replacement is not None:
+            escaped.append(replacement)
+        elif unicodedata.category(character) == "Co":
+            escaped.append(r"\textsuperscript{*}")
+        else:
+            escaped.append(character)
+
+    return "".join(escaped)
