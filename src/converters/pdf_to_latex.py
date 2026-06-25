@@ -22,10 +22,16 @@ from src.reference_extractor import (
 _NUMBERED_SECTION_RE = re.compile(r"^\d+(\.\d+)*\.?\s+\S")
 _ALL_CAPS_MIN_ALPHA = 4
 
-_HEADING_COMMANDS = {
+_HEADING_COMMANDS_STARRED = {
     1: r"\section*",
     2: r"\subsection*",
     3: r"\subsubsection*",
+}
+
+_HEADING_COMMANDS_NUMBERED = {
+    1: r"\section",
+    2: r"\subsection",
+    3: r"\subsubsection",
 }
 
 
@@ -188,6 +194,11 @@ def _is_section_heading(text: str) -> bool:
         return True
 
     return False
+
+
+def _strip_section_number(text: str) -> str:
+    """Remove leading N. or N.N. or N.N.N. prefix from a numbered heading."""
+    return re.sub(r"^\d+(\.\d+)*\.?\s+", "", text.strip())
 
 
 def _section_level(text: str) -> int:
@@ -366,8 +377,13 @@ def _emit_page_content(
     for line in lines:
         if line.heading_level > 0:
             flush_body()
-            cmd = _HEADING_COMMANDS[line.heading_level]
-            body.append(f"{cmd}{{{_escape_latex(line.text)}}}")
+            if _NUMBERED_SECTION_RE.match(line.text.strip()):
+                cmd = _HEADING_COMMANDS_NUMBERED[line.heading_level]
+                heading_text = _strip_section_number(line.text)
+            else:
+                cmd = _HEADING_COMMANDS_STARRED[line.heading_level]
+                heading_text = line.text
+            body.append(f"{cmd}{{{_escape_latex(heading_text)}}}")
             body.append("")
         elif line.text.strip():
             body_buffer.append(line.text)

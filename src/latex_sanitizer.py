@@ -96,7 +96,7 @@ MATH_MODE_REPLACEMENTS = {
 }
 
 INLINE_MATH_TO_MATH_MODE = {
-    r"\(\pm\)": r"\pm",
+    r"\(\pm\)": r"\pm ",
     r"\(\times\)": r"\times",
     r"\(\leq\)": r"\leq",
     r"\(\geq\)": r"\geq",
