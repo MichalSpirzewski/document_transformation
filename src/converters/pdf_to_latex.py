@@ -275,10 +275,12 @@ def _is_greek_or_math_symbol(character: str) -> bool:
 
 
 def _equation_placeholder(equation: EquationCandidate) -> str:
+    commented_source = [f"% extracted: {line}" for line in equation.extracted_text.splitlines()]
     return "\n".join(
         [
             r"\[",
             f"% TODO equation {equation.index}: transcribe from original PDF page {equation.page_number}",
+            *commented_source,
             r"\]",
         ]
     )

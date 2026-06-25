@@ -14,6 +14,11 @@ from src.latex_sanitizer import sanitize_latex_source
 from src.pdf_preview import render_pdf_preview
 from src.project_archive import create_project_zip
 
+try:
+    from streamlit_ace import st_ace
+except ImportError:
+    st_ace = None
+
 
 UPLOAD_ROOT = Path("data/uploads")
 OUTPUT_ROOT = Path("data/outputs")
@@ -51,6 +56,91 @@ def save_selected_project_file(path: Path, content: str) -> str:
     path.write_text(content, encoding="utf-8")
     st.session_state["edited_project_file_source"] = content
     return content
+
+
+def find_action_placeholders(project_dir: Path) -> dict[str, list[dict[str, Any]]]:
+    actions: dict[str, list[dict[str, Any]]] = {"tables": [], "equations": []}
+
+    for path in list_project_files(project_dir):
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except UnicodeDecodeError:
+            continue
+
+        relative_path = path.relative_to(project_dir)
+        for line_number, line in enumerate(lines, start=1):
+            if path.suffix == ".tex" and "TODO: copy table caption from original PDF" in line:
+                actions["tables"].append(
+                    {
+                        "file": path,
+                        "line_number": line_number,
+                        "label": f"{relative_path}:{line_number} caption",
+                    }
+                )
+            if path.suffix == ".tex" and "% TODO equation" in line:
+                actions["equations"].append(
+                    {
+                        "file": path,
+                        "line_number": line_number,
+                        "label": f"{relative_path}:{line_number} equation",
+                    }
+                )
+
+    return actions
+
+
+def select_placeholder_action(action: dict[str, Any]) -> None:
+    path = action["file"]
+    set_selected_project_file(path)
+    st.session_state["selected_placeholder_line"] = action["line_number"]
+
+
+def render_placeholder_snippet(path: Path, line_number: int, context: int = 4) -> None:
+    lines = path.read_text(encoding="utf-8").splitlines()
+    start = max(line_number - context, 1)
+    end = min(line_number + context, len(lines))
+    snippet = []
+
+    for current_line_number in range(start, end + 1):
+        marker = ">" if current_line_number == line_number else " "
+        snippet.append(f"{marker} {current_line_number:04d}: {lines[current_line_number - 1]}")
+
+    st.code("\n".join(snippet), language="latex")
+
+
+def render_project_editor(selected_file: Path, selected_label: str) -> None:
+    source = st.session_state["edited_project_file_source"]
+    selected_placeholder_line = st.session_state.get("selected_placeholder_line")
+
+    if st_ace is None:
+        st.text_area(
+            "Selected project file source",
+            height=760,
+            key="edited_project_file_source",
+            label_visibility="collapsed",
+        )
+        st.caption("Install `streamlit-ace` to enable the code editor view.")
+        return
+
+    language = "latex" if selected_file.suffix == ".tex" else "markdown"
+    editor_key = f"ace::{selected_label}::{selected_placeholder_line or 0}"
+    edited_source = st_ace(
+        value=source,
+        language=language,
+        theme="github",
+        keybinding="vscode",
+        font_size=14,
+        tab_size=2,
+        show_gutter=True,
+        show_print_margin=False,
+        wrap=True,
+        auto_update=True,
+        height=760,
+        key=editor_key,
+    )
+
+    if edited_source is not None:
+        st.session_state["edited_project_file_source"] = edited_source
 
 
 def find_source_for_project(project_dir: Path) -> Path | None:
@@ -298,6 +388,8 @@ if last_conversion is not None:
     if "edited_project_file_source" not in st.session_state:
         set_selected_project_file(selected_file)
 
+    placeholder_actions = find_action_placeholders(project_dir)
+
     with st.container():
         clear_action, restart_action, cleanup_action, spacer = st.columns([1, 1, 1, 2])
 
@@ -397,9 +489,9 @@ if last_conversion is not None:
             st.session_state["last_conversion"]["zip_path"] = zip_path
             st.success("Generated PDF compiled.")
 
-    left, middle, right = st.columns([1.15, 1, 1])
+    navigation, generated_preview, editor, original_preview = st.columns([0.85, 1, 1.15, 1])
 
-    with left:
+    with navigation:
         st.markdown("**Project Files**")
         selected_label = str(selected_file.relative_to(project_dir))
         file_labels = [str(path.relative_to(project_dir)) for path in project_files]
@@ -411,17 +503,36 @@ if last_conversion is not None:
         newly_selected_file = project_dir / selected_label
         if newly_selected_file != selected_file:
             set_selected_project_file(newly_selected_file)
+            st.session_state.pop("selected_placeholder_line", None)
             st.rerun()
 
-        st.markdown(f"**Editing `{selected_label}`**")
-        st.text_area(
-            "Selected project file source",
-            height=760,
-            key="edited_project_file_source",
-            label_visibility="collapsed",
-        )
+        st.markdown("**Action Placeholders**")
+        equation_tab, table_tab = st.tabs(["Equations", "Tables"])
 
-    with middle:
+        with equation_tab:
+            if placeholder_actions["equations"]:
+                for index, action in enumerate(placeholder_actions["equations"], start=1):
+                    if st.button(action["label"], key=f"equation_action_{index}"):
+                        select_placeholder_action(action)
+                        st.rerun()
+            else:
+                st.info("No equation placeholders found.")
+
+        with table_tab:
+            if placeholder_actions["tables"]:
+                for index, action in enumerate(placeholder_actions["tables"], start=1):
+                    if st.button(action["label"], key=f"table_action_{index}"):
+                        select_placeholder_action(action)
+                        st.rerun()
+            else:
+                st.info("No table caption placeholders found.")
+
+        selected_placeholder_line = st.session_state.get("selected_placeholder_line")
+        if selected_placeholder_line and Path(st.session_state["selected_project_file"]) == selected_file:
+            st.markdown(f"**Placeholder Context: line {selected_placeholder_line}**")
+            render_placeholder_snippet(selected_file, selected_placeholder_line)
+
+    with generated_preview:
         st.markdown("**Generated PDF**")
         compiled_pdf_path = st.session_state.get("compiled_pdf_path")
         if compiled_pdf_path and Path(compiled_pdf_path).exists():
@@ -429,7 +540,11 @@ if last_conversion is not None:
         else:
             st.info("Compile the LaTeX project to preview the generated PDF.")
 
-    with right:
+    with editor:
+        st.markdown(f"**Editing `{selected_label}`**")
+        render_project_editor(selected_file, selected_label)
+
+    with original_preview:
         st.markdown("**Original PDF**")
         if source_path is not None and source_path.suffix.lower() == ".pdf" and source_path.exists():
             render_pdf_preview(source_path)
