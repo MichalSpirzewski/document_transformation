@@ -278,10 +278,10 @@ def _equation_placeholder(equation: EquationCandidate) -> str:
     commented_source = [f"% extracted: {line}" for line in equation.extracted_text.splitlines()]
     return "\n".join(
         [
-            r"\[",
+            r"\begin{equation}",
             f"% TODO equation {equation.index}: transcribe from original PDF page {equation.page_number}",
             *commented_source,
-            r"\]",
+            r"\end{equation}",
         ]
     )
 
