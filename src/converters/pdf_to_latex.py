@@ -11,6 +11,7 @@ import fitz
 import pdfplumber
 
 from src.converters.docx_to_latex import ConversionError
+from src.author_extractor import extract_authors, render_author_tex, render_authors_md
 from src.reference_extractor import (
     REFERENCES_HEADER_RE,
     ReferenceEntry,
@@ -44,6 +45,8 @@ class PdfConversionResult:
     page_count: int
     warning_count: int
     reference_count: int
+    figure_count: int
+    author_count: int
 
 
 @dataclass(frozen=True)
@@ -70,6 +73,16 @@ class EquationCandidate:
     extracted_text: str
 
 
+@dataclass(frozen=True)
+class ExtractedImage:
+    page_number: int
+    index: int
+    rel_path: Path  # relative to project dir, e.g. figures/page_002_fig_001.jpeg
+    width_px: int
+    height_px: int
+    bbox: tuple[float, float, float, float]  # (x0, y0, x1, y1) in PDF points
+
+
 def convert_pdf_to_latex(source_path: Path, output_dir: Path) -> PdfConversionResult:
     if source_path.suffix.lower() != ".pdf":
         raise ConversionError("Only PDF files are supported by the PDF converter.")
@@ -79,16 +92,20 @@ def convert_pdf_to_latex(source_path: Path, output_dir: Path) -> PdfConversionRe
 
     project_dir = output_dir
     tables_dir = project_dir / "tables"
+    figures_dir = project_dir / "figures"
     notes_dir = project_dir / "notes"
     main_tex = project_dir / "main.tex"
     warnings_path = notes_dir / "conversion_warnings.md"
     equations_path = notes_dir / "equations_to_review.md"
     references_path = notes_dir / "references.md"
+    figures_notes_path = notes_dir / "figures.md"
+    authors_path = notes_dir / "authors.md"
 
     if project_dir.exists():
         shutil.rmtree(project_dir)
 
     tables_dir.mkdir(parents=True, exist_ok=True)
+    figures_dir.mkdir(parents=True, exist_ok=True)
     notes_dir.mkdir(parents=True, exist_ok=True)
 
     pages = _extract_pdf_content(source_path)
@@ -100,6 +117,12 @@ def convert_pdf_to_latex(source_path: Path, output_dir: Path) -> PdfConversionRe
     warning_count = sum(1 for warning in warnings if warning.startswith("- "))
     equations: list[EquationCandidate] = []
 
+    images_by_page = _extract_and_write_images(source_path, figures_dir)
+    figure_count = sum(len(imgs) for imgs in images_by_page.values())
+
+    author_groups = extract_authors(source_path)
+    author_count = sum(len(g.names) for g in author_groups)
+
     references, ref_start_page = extract_references(pages)
     escaped_references = [
         ReferenceEntry(index=r.index, raw_text=_escape_latex(r.raw_text))
@@ -108,12 +131,17 @@ def convert_pdf_to_latex(source_path: Path, output_dir: Path) -> PdfConversionRe
     bibliography_tex = render_thebibliography_tex(escaped_references)
 
     main_tex.write_text(
-        _render_latex(source_path.name, pages, equations, bibliography_tex, ref_start_page),
+        _render_latex(
+            source_path.name, pages, equations, bibliography_tex,
+            ref_start_page, images_by_page, author_groups,
+        ),
         encoding="utf-8",
     )
     warnings_path.write_text("\n".join(warnings) + "\n", encoding="utf-8")
     equations_path.write_text(_render_equation_review(equations), encoding="utf-8")
     references_path.write_text(render_references_md(references, ref_start_page), encoding="utf-8")
+    figures_notes_path.write_text(_render_figures_md(images_by_page), encoding="utf-8")
+    authors_path.write_text(render_authors_md(author_groups), encoding="utf-8")
 
     return PdfConversionResult(
         project_dir=project_dir,
@@ -123,6 +151,8 @@ def convert_pdf_to_latex(source_path: Path, output_dir: Path) -> PdfConversionRe
         page_count=len(pages),
         warning_count=warning_count,
         reference_count=len(references),
+        figure_count=figure_count,
+        author_count=author_count,
     )
 
 
@@ -285,6 +315,165 @@ def _build_warnings(pages: list[PdfPageContent]) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# Image extraction
+# ---------------------------------------------------------------------------
+
+_HEADER_FOOTER_THRESHOLD = 0.10  # top/bottom 10% of page height
+_MIN_IMAGE_PIXELS = 10_000       # ignore images smaller than ~100×100
+
+
+def _extract_and_write_images(
+    source_path: Path, figures_dir: Path
+) -> dict[int, list[ExtractedImage]]:
+    """Extract embedded content images from each page, skip headers/footers and tiny icons."""
+    images_by_page: dict[int, list[ExtractedImage]] = {}
+    seen_xrefs: set[int] = set()
+
+    with fitz.open(source_path) as doc:
+        for page_num, page in enumerate(doc, start=1):
+            page_height = page.rect.height
+            header_limit = page_height * _HEADER_FOOTER_THRESHOLD
+            footer_limit = page_height * (1.0 - _HEADER_FOOTER_THRESHOLD)
+            img_index = 1
+            page_images: list[ExtractedImage] = []
+
+            for img_info in page.get_images(full=True):
+                xref, width_px, height_px = img_info[0], img_info[2], img_info[3]
+
+                if xref in seen_xrefs:
+                    continue
+
+                try:
+                    rects = page.get_image_rects(img_info)
+                    bbox = rects[0] if rects else None
+                except Exception:
+                    bbox = None
+
+                if bbox is None:
+                    continue
+
+                if bbox.y1 <= header_limit or bbox.y0 >= footer_limit:
+                    seen_xrefs.add(xref)
+                    continue
+
+                if width_px * height_px < _MIN_IMAGE_PIXELS:
+                    seen_xrefs.add(xref)
+                    continue
+
+                try:
+                    img_data = doc.extract_image(xref)
+                except Exception:
+                    continue
+
+                ext = img_data.get("ext", "png")
+                filename = f"page_{page_num:03d}_fig_{img_index:03d}.{ext}"
+                (figures_dir / filename).write_bytes(img_data["image"])
+
+                page_images.append(ExtractedImage(
+                    page_number=page_num,
+                    index=img_index,
+                    rel_path=Path("figures") / filename,
+                    width_px=width_px,
+                    height_px=height_px,
+                    bbox=(bbox.x0, bbox.y0, bbox.x1, bbox.y1),
+                ))
+                seen_xrefs.add(xref)
+                img_index += 1
+
+            if page_images:
+                images_by_page[page_num] = page_images
+
+    return images_by_page
+
+
+def _render_figures_md(images_by_page: dict[int, list[ExtractedImage]]) -> str:
+    all_images = [img for imgs in images_by_page.values() for img in imgs]
+    lines = ["# Extracted Figures", ""]
+
+    if not all_images:
+        lines.append("No embedded content images were found in this PDF.")
+        return "\n".join(lines) + "\n"
+
+    lines.extend([
+        f"Found {len(all_images)} embedded images (headers and icons excluded).",
+        "",
+        "Each image appears in `main.tex` as a `\\begin{figure}` environment with a TODO caption.",
+        "",
+    ])
+
+    for img in all_images:
+        lines.extend([
+            f"## Figure {img.index} (page {img.page_number})",
+            "",
+            f"- File: `{img.rel_path.as_posix()}`",
+            f"- Dimensions: {img.width_px} × {img.height_px} px",
+            "",
+        ])
+
+    return "\n".join(lines)
+
+
+def _group_images_by_row(images: list[ExtractedImage]) -> list[list[ExtractedImage]]:
+    """Group images into horizontal rows by vertical overlap, sorted left-to-right within each row."""
+    if not images:
+        return []
+
+    sorted_imgs = sorted(images, key=lambda img: img.bbox[1])  # by y0
+    groups: list[list[ExtractedImage]] = []
+    current_group = [sorted_imgs[0]]
+    group_y0 = sorted_imgs[0].bbox[1]
+    group_y1 = sorted_imgs[0].bbox[3]
+
+    for img in sorted_imgs[1:]:
+        img_y0, img_y1 = img.bbox[1], img.bbox[3]
+        overlap = min(img_y1, group_y1) - max(img_y0, group_y0)
+        img_height = img_y1 - img_y0
+        if overlap > 0.30 * img_height:
+            current_group.append(img)
+            group_y0 = min(group_y0, img_y0)
+            group_y1 = max(group_y1, img_y1)
+        else:
+            groups.append(sorted(current_group, key=lambda img: img.bbox[0]))
+            current_group = [img]
+            group_y0, group_y1 = img_y0, img_y1
+
+    groups.append(sorted(current_group, key=lambda img: img.bbox[0]))
+    return groups
+
+
+def _render_figure_group_tex(images: list[ExtractedImage]) -> str:
+    """Render one figure environment for a row of one or more images."""
+    first = images[0]
+    label = f"fig:page{first.page_number:03d}fig{first.index:03d}"
+    caption = f"\\caption{{TODO: add figure caption from original PDF page {first.page_number}}}"
+
+    if len(images) == 1:
+        return "\n".join([
+            r"\begin{figure}[htbp]",
+            r"\centering",
+            f"\\includegraphics[width=0.8\\linewidth]{{{first.rel_path.as_posix()}}}",
+            caption,
+            f"\\label{{{label}}}",
+            r"\end{figure}",
+        ])
+
+    n = len(images)
+    width = f"{0.98 / n:.2f}\\linewidth"
+    lines = [r"\begin{figure}[htbp]", r"\centering"]
+    for i, img in enumerate(images):
+        lines += [
+            f"\\begin{{minipage}}{{{width}}}",
+            r"\centering",
+            f"\\includegraphics[width=\\linewidth]{{{img.rel_path.as_posix()}}}",
+            r"\end{minipage}",
+        ]
+        if i < n - 1:
+            lines.append(r"\hfill")
+    lines += [caption, f"\\label{{{label}}}", r"\end{figure}"]
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # LaTeX rendering
 # ---------------------------------------------------------------------------
 
@@ -294,6 +483,8 @@ def _render_latex(
     equations: list[EquationCandidate],
     bibliography_tex: str,
     ref_start_page: int | None,
+    images_by_page: dict[int, list[ExtractedImage]],
+    author_groups: list,
 ) -> str:
     body: list[str] = []
     table_file_index = 1
@@ -305,14 +496,16 @@ def _render_latex(
         if ref_start_page is not None and page.page_number == ref_start_page:
             pre_lines = _lines_before_references_header(page.lines)
             table_file_index = _emit_page_content(
-                body, pre_lines, page.page_number, equations, table_file_index, page.tables
+                body, pre_lines, page.page_number, equations, table_file_index,
+                page.tables, images_by_page.get(page.page_number, []),
             )
             body.append(bibliography_tex)
             body.append("")
             continue
 
         table_file_index = _emit_page_content(
-            body, page.lines, page.page_number, equations, table_file_index, page.tables
+            body, page.lines, page.page_number, equations, table_file_index,
+            page.tables, images_by_page.get(page.page_number, []),
         )
 
     return "\n".join(
@@ -324,6 +517,7 @@ def _render_latex(
             r"\usepackage{amssymb}",
             r"\usepackage{lmodern}",
             r"\usepackage{geometry}",
+            r"\usepackage{graphicx}",
             r"\usepackage{longtable}",
             r"\usepackage{booktabs}",
             r"\usepackage{array}",
@@ -332,6 +526,7 @@ def _render_latex(
             r"\setlength{\parskip}{6pt}",
             "",
             f"\\title{{PDF LaTeX Draft: {_escape_latex(source_name)}}}",
+            render_author_tex(author_groups),
             r"\date{}",
             "",
             r"\begin{document}",
@@ -351,10 +546,11 @@ def _emit_page_content(
     equations: list[EquationCandidate],
     table_file_index: int,
     page_tables: list,
+    page_images: list[ExtractedImage],
 ) -> int:
     """Render a page's lines into the body list. Returns the updated table file index."""
     non_empty = [ln for ln in lines if ln.text.strip()]
-    if not non_empty:
+    if not non_empty and not page_images:
         return table_file_index
 
     has_headings = any(ln.heading_level > 0 for ln in non_empty)
@@ -395,6 +591,10 @@ def _emit_page_content(
         body.append(f"\\input{{{_table_file_path(page_number, table_file_index).as_posix()}}}")
         body.append("")
         table_file_index += 1
+
+    for row in _group_images_by_row(page_images):
+        body.append(_render_figure_group_tex(row))
+        body.append("")
 
     return table_file_index
 

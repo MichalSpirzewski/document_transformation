@@ -56,7 +56,7 @@ def save_selected_project_file(path: Path, content: str) -> str:
 
 
 def find_action_placeholders(project_dir: Path) -> dict[str, list[dict[str, Any]]]:
-    actions: dict[str, list[dict[str, Any]]] = {"tables": [], "equations": [], "references": []}
+    actions: dict[str, list[dict[str, Any]]] = {"tables": [], "equations": [], "references": [], "figures": []}
 
     for path in list_project_files(project_dir):
         try:
@@ -90,6 +90,14 @@ def find_action_placeholders(project_dir: Path) -> dict[str, list[dict[str, Any]
                         "file": path,
                         "line_number": line_number,
                         "label": f"{key}",
+                    }
+                )
+            if path.suffix == ".tex" and "TODO: add figure caption from original PDF" in line:
+                actions["figures"].append(
+                    {
+                        "file": path,
+                        "line_number": line_number,
+                        "label": f"{relative_path}:{line_number} caption",
                     }
                 )
 
@@ -253,7 +261,8 @@ def convert_existing_source(source_path: Path) -> None:
                 result = convert_pdf_to_latex(source_path, output_dir)
                 summary = (
                     f"Created `{result.main_tex.name}` from {result.page_count} pages "
-                    f"with {len(result.table_files)} detected tables, {result.reference_count} references, "
+                    f"with {result.author_count} authors, {len(result.table_files)} tables, "
+                    f"{result.figure_count} figures, {result.reference_count} references, "
                     f"and {result.warning_count} warnings."
                 )
             else:
@@ -518,7 +527,7 @@ if last_conversion is not None:
             st.rerun()
 
         st.markdown("**Action Placeholders**")
-        equation_tab, table_tab, reference_tab = st.tabs(["Equations", "Tables", "References"])
+        equation_tab, table_tab, reference_tab, figure_tab = st.tabs(["Equations", "Tables", "References", "Figures"])
 
         with equation_tab:
             if placeholder_actions["equations"]:
@@ -546,6 +555,15 @@ if last_conversion is not None:
                         st.rerun()
             else:
                 st.info("No references detected.")
+
+        with figure_tab:
+            if placeholder_actions["figures"]:
+                for index, action in enumerate(placeholder_actions["figures"], start=1):
+                    if st.button(action["label"], key=f"figure_action_{index}"):
+                        select_placeholder_action(action)
+                        st.rerun()
+            else:
+                st.info("No figure captions to review.")
 
         selected_placeholder_line = st.session_state.get("selected_placeholder_line")
         if selected_placeholder_line and Path(st.session_state["selected_project_file"]) == selected_file:
