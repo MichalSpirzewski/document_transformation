@@ -69,6 +69,17 @@ latexmk -pdf -interaction=nonstopmode -halt-on-error main.tex
 The converter generates standalone LaTeX and patches common Word symbols so
 `pdflatex` can compile them on this machine.
 
+## PDF conversion notes
+
+PDF conversion is currently a draft generator for digital PDFs:
+
+- PyMuPDF extracts page text.
+- pdfplumber extracts detected tables.
+- The app writes `main.tex`, `tables/`, and `notes/conversion_warnings.md`.
+
+Scanned/image-only PDFs, equations, figures, captions, and complex page layouts
+will still need manual review.
+
 ## Later updates
 
 To add packages later without changing `base`, edit `environment.yml` and run:

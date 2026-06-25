@@ -6,6 +6,7 @@ from typing import Any
 import streamlit as st
 
 from src.converters.docx_to_latex import ConversionError, convert_docx_to_latex
+from src.converters.pdf_to_latex import convert_pdf_to_latex
 from src.project_archive import create_project_zip
 
 
@@ -24,7 +25,7 @@ st.set_page_config(page_title="Document Transformation", page_icon="DT", layout=
 
 st.title("Document Transformation")
 
-uploaded_file = st.file_uploader("Upload a DOCX file", type=["docx"])
+uploaded_file = st.file_uploader("Upload a DOCX or PDF file", type=["docx", "pdf"])
 
 if uploaded_file is not None:
     source_path = save_upload(uploaded_file)
@@ -33,15 +34,26 @@ if uploaded_file is not None:
     st.info(f"Ready to convert: {uploaded_file.name}")
 
     if st.button("Convert to LaTeX", type="primary"):
-        with st.spinner("Converting DOCX to LaTeX with Pandoc..."):
+        with st.spinner("Converting to LaTeX..."):
             try:
-                result = convert_docx_to_latex(source_path, output_dir)
+                if source_path.suffix.lower() == ".docx":
+                    result = convert_docx_to_latex(source_path, output_dir)
+                    summary = f"Created `{result.main_tex.name}` with {len(result.media_files)} media files."
+                elif source_path.suffix.lower() == ".pdf":
+                    result = convert_pdf_to_latex(source_path, output_dir)
+                    summary = (
+                        f"Created `{result.main_tex.name}` from {result.page_count} pages "
+                        f"with {len(result.table_files)} detected tables and {result.warning_count} warnings."
+                    )
+                else:
+                    raise ConversionError("Only DOCX and PDF files are supported.")
+
                 zip_path = create_project_zip(result.project_dir)
             except ConversionError as error:
                 st.error(str(error))
             else:
                 st.success("Conversion complete.")
-                st.write(f"Created `{result.main_tex.name}` with {len(result.media_files)} media files.")
+                st.write(summary)
 
                 st.download_button(
                     label="Download LaTeX project ZIP",
