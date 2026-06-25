@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -52,11 +53,116 @@ def save_selected_project_file(path: Path, content: str) -> str:
     return content
 
 
+def find_source_for_project(project_dir: Path) -> Path | None:
+    for suffix in (".pdf", ".docx"):
+        candidate = UPLOAD_ROOT / f"{project_dir.name}{suffix}"
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def list_transformation_history() -> list[dict[str, Any]]:
+    if not OUTPUT_ROOT.exists():
+        return []
+
+    history = []
+    project_dirs = [path for path in OUTPUT_ROOT.iterdir() if path.is_dir()]
+    for project_dir in sorted(project_dirs, key=lambda path: path.stat().st_mtime, reverse=True):
+        main_tex = project_dir / "main.tex"
+        source_path = find_source_for_project(project_dir)
+        zip_path = project_dir.with_suffix(".zip")
+        pdf_path = project_dir / "main.pdf"
+        table_count = len(list((project_dir / "tables").glob("page_*_table_*.tex"))) if (project_dir / "tables").exists() else 0
+
+        history.append(
+            {
+                "name": project_dir.name,
+                "source_path": source_path,
+                "project_dir": project_dir,
+                "main_tex": main_tex,
+                "zip_path": zip_path,
+                "pdf_path": pdf_path,
+                "table_count": table_count,
+                "modified": project_dir.stat().st_mtime,
+            }
+        )
+
+    return history
+
+
+def activate_history_item(item: dict[str, Any]) -> None:
+    source_path = item["source_path"]
+    project_dir = item["project_dir"]
+    main_tex = item["main_tex"]
+    zip_path = item["zip_path"]
+
+    if not main_tex.exists():
+        st.error(f"Cannot open history item without main.tex: {project_dir}")
+        return
+
+    if not zip_path.exists():
+        zip_path = create_project_zip(project_dir)
+
+    source_type = source_path.suffix.lower() if source_path else ""
+    summary = f"Opened `{project_dir.name}` from history."
+    if item["table_count"]:
+        summary += f" Found {item['table_count']} table files."
+
+    st.session_state["last_conversion"] = {
+        "source_path": source_path,
+        "project_dir": project_dir,
+        "main_tex": main_tex,
+        "zip_path": zip_path,
+        "source_type": source_type,
+        "summary": summary,
+    }
+    set_selected_project_file(main_tex)
+    if item["pdf_path"].exists():
+        st.session_state["compiled_pdf_path"] = item["pdf_path"]
+    else:
+        st.session_state.pop("compiled_pdf_path", None)
+
+
+def clear_output_data() -> None:
+    if OUTPUT_ROOT.exists():
+        shutil.rmtree(OUTPUT_ROOT)
+    OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
+    for key in ("last_conversion", "selected_project_file", "edited_project_file_source", "compiled_pdf_path"):
+        st.session_state.pop(key, None)
+
+
 st.set_page_config(page_title="Document Transformation", page_icon="DT", layout="wide")
 
 st.title("Document Transformation")
 
 uploaded_file = st.file_uploader("Upload a DOCX or PDF file", type=["docx", "pdf"])
+
+with st.expander("Transformation History", expanded=True):
+    history = list_transformation_history()
+    history_left, history_right = st.columns([3, 1])
+
+    with history_left:
+        if history:
+            history_labels = [
+                f"{item['name']} | source: {item['source_path'].name if item['source_path'] else 'missing'} | tables: {item['table_count']}"
+                for item in history
+            ]
+            selected_history_label = st.selectbox("Previous transformations", history_labels)
+            selected_history = history[history_labels.index(selected_history_label)]
+
+            open_history = st.button("Open selected transformation")
+            if open_history:
+                activate_history_item(selected_history)
+                st.rerun()
+        else:
+            st.info("No previous transformations found in data/outputs.")
+
+    with history_right:
+        clear_outputs = st.button("Clear data/outputs")
+        if clear_outputs:
+            clear_output_data()
+            st.success("Cleared local output data.")
+            st.rerun()
 
 if uploaded_file is not None:
     source_path = save_upload(uploaded_file)
@@ -107,7 +213,8 @@ if uploaded_file is not None:
 last_conversion = st.session_state.get("last_conversion")
 
 if last_conversion is not None:
-    source_path = Path(last_conversion["source_path"])
+    raw_source_path = last_conversion["source_path"]
+    source_path = Path(raw_source_path) if raw_source_path else None
     project_dir = Path(last_conversion["project_dir"])
     main_tex = Path(last_conversion["main_tex"])
     zip_path = Path(last_conversion["zip_path"])
@@ -136,7 +243,7 @@ if last_conversion is not None:
         with clear_action:
             clear_previews = st.button("Clear previews")
         with restart_action:
-            restart_conversion = st.button("Restart conversion")
+            restart_conversion = st.button("Restart conversion", disabled=source_path is None or not source_path.exists())
         with cleanup_action:
             cleanup_tables = st.button("Clean duplicate tables")
 
@@ -162,6 +269,8 @@ if last_conversion is not None:
     if restart_conversion:
         with st.spinner("Restarting conversion from the original file..."):
             try:
+                if source_path is None:
+                    raise ConversionError("Cannot restart conversion because the original upload is missing.")
                 if source_path.suffix.lower() == ".docx":
                     result = convert_docx_to_latex(source_path, project_dir)
                     summary = f"Created `{result.main_tex.name}` with {len(result.media_files)} media files."
@@ -261,7 +370,9 @@ if last_conversion is not None:
 
     with right:
         st.markdown("**Original PDF**")
-        if source_path.suffix.lower() == ".pdf" and source_path.exists():
+        if source_path is not None and source_path.suffix.lower() == ".pdf" and source_path.exists():
             render_pdf_preview(source_path)
+        elif source_path is None:
+            st.info("Original upload is missing for this history item.")
         else:
             st.info("Original PDF preview is available after converting a PDF file.")
